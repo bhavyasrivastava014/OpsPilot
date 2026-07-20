@@ -180,4 +180,75 @@ class FaissVectorStoreService:
 
         return out
 
+    def delete_by_document_id(
+        self,
+        *,
+        index_name: str,
+        document_id: str,
+    ) -> int:
+        """Delete all vectors and metadata entries matching the given document_id.
+
+        This rebuilds the index from scratch, removing only the entries that match.
+        Returns the number of vectors deleted.
+        """
+        paths = get_vectorstore_paths(base_dir=self.base_dir, index_name=index_name)
+        if not paths.index_file.exists():
+            return 0
+
+        meta = self._load_meta(paths.meta_file)
+        if not meta:
+            return 0
+
+        # Separate kept vs deleted metadata
+        kept_meta: list[dict[str, Any]] = []
+        deleted_count = 0
+        for md in meta:
+            if md.get("document_id") == document_id:
+                deleted_count += 1
+            else:
+                kept_meta.append(md)
+
+        if deleted_count == 0:
+            return 0
+
+        # Rebuild FAISS index from kept vectors
+        # We need to re-embed the text of kept entries
+        kept_texts = [md.get("text", "") for md in kept_meta if md.get("text", "").strip()]
+
+        if not kept_texts:
+            # All vectors deleted — remove index files entirely
+            if paths.index_file.exists():
+                paths.index_file.unlink()
+            if paths.meta_file.exists():
+                paths.meta_file.unlink()
+            return deleted_count
+
+        # Get embeddings for kept texts using the same method
+        # We import here to avoid circular imports
+        from app.services.sentence_transformer_embeddings_service import GeminiEmbeddingsService
+        from app.config.settings import settings
+
+        embed_service = GeminiEmbeddingsService(api_key=settings.GEMINI_API_KEY)
+        result = embed_service.embed_texts(texts=kept_texts, model=settings.GEMINI_EMBEDDING_MODEL)
+
+        # Rebuild index from scratch
+        import numpy as np
+        x = np.asarray(result.vectors, dtype=np.float32)
+        dim = x.shape[1]
+        index = self.faiss.IndexFlatL2(dim)
+        index.add(x)
+
+        # Rewrite metadata without _vector_pos (will be reassigned)
+        clean_meta: list[dict[str, Any]] = []
+        for i, md in enumerate(kept_meta):
+            clean_md = {k: v for k, v in md.items() if k != "_vector_pos"}
+            clean_md["_vector_pos"] = i
+            clean_meta.append(clean_md)
+
+        # Persist
+        self.faiss.write_index(index, str(paths.index_file))
+        self._save_meta(paths.meta_file, clean_meta)
+
+        return deleted_count
+
 

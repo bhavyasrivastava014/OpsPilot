@@ -10,6 +10,7 @@ from typing import List
 from fastapi import APIRouter, File, HTTPException, UploadFile
 from fastapi.responses import JSONResponse
 
+from app.config.settings import settings
 from app.routes.pdf_utils import extract_pdf_pages, is_pdf_magic
 from app.services.faiss_vector_store_service import FaissVectorStoreService
 from app.services.gemini_embeddings_service import GeminiEmbeddingsService
@@ -83,9 +84,6 @@ async def upload_pdfs(files: List[UploadFile] = File(...)):
         # We'll create them later once we successfully validate at least one PDF.
         gemini = None
         faiss_store = None
-
-    # Import settings lazily to avoid cycles
-    from app.config.settings import settings
 
     for upload in files:
         original_filename = upload.filename or ""

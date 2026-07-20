@@ -29,6 +29,43 @@ export async function listDocuments(indexName: string = 'default'): Promise<List
 }
 
 
+export async function deleteDocument(indexName: string, documentId: string): Promise<{ ok: boolean; chunks_deleted: number }> {
+  const res = await fetch(buildApiUrl(`/documents/${encodeURIComponent(indexName)}/${encodeURIComponent(documentId)}`), {
+    method: 'DELETE',
+  })
+  if (!res.ok) {
+    const text = await res.text().catch(() => '')
+    throw new Error(`Failed to delete document: ${res.status} ${text}`)
+  }
+  return res.json()
+}
+
+export type PreviewPage = {
+  page_number: number
+  chunks: Array<{ chunk_id: string; text: string; chunk_index: number }>
+}
+
+export type PreviewResponse = {
+  ok: boolean
+  index_name: string
+  document_id: string
+  filename: string
+  pages: PreviewPage[]
+  timestamp: string
+}
+
+export async function previewDocument(indexName: string, documentId: string): Promise<PreviewResponse> {
+  const res = await fetch(
+    buildApiUrl(`/documents/${encodeURIComponent(indexName)}/${encodeURIComponent(documentId)}/preview`),
+  )
+  if (!res.ok) {
+    const text = await res.text().catch(() => '')
+    throw new Error(`Failed to preview document: ${res.status} ${text}`)
+  }
+  return res.json()
+}
+
+
 export async function ingestPdfs(files: File[], indexName: string, onUploadProgress?: (pct: number) => void): Promise<UploadResponse> {
 
   const formData = new FormData()

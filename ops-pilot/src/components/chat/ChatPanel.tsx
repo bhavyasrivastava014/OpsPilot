@@ -223,11 +223,6 @@ export function ChatPanel({ onError }: Props) {
 
         <div className="min-w-0">
           <div className="truncate text-sm font-semibold text-slate-100">Chat</div>
-          <div className="truncate text-xs text-slate-400">Connected to backend • retrieval + Ollama</div>
-        </div>
-        <div className="flex items-center gap-2">
-          <span className="inline-flex h-2 w-2 rounded-full bg-emerald-400/90 shadow-[0_0_20px_rgba(52,211,153,0.6)]" />
-          <span className="text-xs text-slate-400">Online</span>
         </div>
       </div>
 
