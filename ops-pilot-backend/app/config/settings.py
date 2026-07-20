@@ -24,6 +24,10 @@ class Settings(BaseSettings):
 
     # Gemini / Embeddings
     GEMINI_API_KEY: str | None = Field(default=None, description="Gemini API key (required for Gemini text generation)")
+    GEMINI_GEN_MODEL: str = Field(
+        default="gemini-2.0-flash",
+        description="Gemini generation model name (e.g. gemini-2.0-flash, gemini-1.5-pro)",
+    )
     GEMINI_EMBEDDING_MODEL: str = Field(
         default="sentence-transformers/all-MiniLM-L6-v2",
         description="Sentence-transformers embedding model name",

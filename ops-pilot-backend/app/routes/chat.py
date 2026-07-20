@@ -12,7 +12,7 @@ from app.routes.retrieve import RetrievedChunk
 from app.services.conversation_memory_service import ConversationMemoryService
 from app.services.faiss_vector_store_service import FaissVectorStoreService
 from app.services.gemini_embeddings_service import GeminiEmbeddingsService
-from app.services.ollama_service import OllamaService
+from app.services.gemini_text_service import GeminiTextService
 
 
 router = APIRouter()
@@ -40,9 +40,8 @@ class ChatRequest(BaseModel):
     )
 
     # Gemini generation model
-    # Note: If not set in env, we fall back to a conservative default.
     gen_model: str = Field(
-        default_factory=lambda: settings.OLLAMA_MODEL,
+        default_factory=lambda: settings.GEMINI_GEN_MODEL,
         description="Gemini generation model name",
     )
 
@@ -146,8 +145,7 @@ def chat(req: ChatRequest) -> ChatResponse:
     if not req.question or not req.question.strip():
         raise HTTPException(status_code=400, detail="question must be a non-empty string")
 
-    # Use Ollama local server for generation (no Gemini dependency required)
-
+    # Use Gemini API for generation
     try:
         # Retriever: embed question -> FAISS search
         gemini_embed = GeminiEmbeddingsService(api_key=settings.GEMINI_API_KEY)
@@ -190,11 +188,11 @@ def chat(req: ChatRequest) -> ChatResponse:
                 "Provide the answer."
             )
 
-            # Use local Ollama server for generation
-            ollama = OllamaService()
-            requested_model = req.gen_model or settings.OLLAMA_MODEL
+            # Use Gemini API for answer generation
+            gemini_text = GeminiTextService(api_key=settings.GEMINI_API_KEY)
+            requested_model = req.gen_model or settings.GEMINI_GEN_MODEL
             try:
-                text = ollama.generate(prompt=prompt, system=system_prompt, model=requested_model)
+                text = gemini_text.generate(prompt=prompt, system=system_prompt, model=requested_model)
             except Exception as exc:
                 raise
 
