@@ -1,10 +1,10 @@
 from __future__ import annotations
 
+from functools import lru_cache
 from typing import Optional
 
-import google.generativeai as genai
-
 from app.config.settings import settings
+import google.generativeai as genai
 
 
 class GeminiTextService:
@@ -12,7 +12,17 @@ class GeminiTextService:
 
     Uses the GEMINI_API_KEY from settings and a configurable model
     (default: gemini-2.0-flash) for chat-style answer generation.
+
+    This class is a singleton — use GeminiTextService.get_instance()
+    to reuse the same model instances across requests.
     """
+
+    _instance: "GeminiTextService | None" = None
+
+    def __new__(cls, *args, **kwargs) -> "GeminiTextService":
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
 
     def __init__(
         self,
@@ -20,6 +30,10 @@ class GeminiTextService:
         api_key: Optional[str] = None,
         model_name: Optional[str] = None,
     ) -> None:
+        if getattr(self, "_initialized", False):
+            return
+        self._initialized = True
+
         self.api_key = api_key or settings.GEMINI_API_KEY
         self.model_name = (
             model_name or settings.GEMINI_GEN_MODEL or "gemini-2.0-flash"
@@ -31,6 +45,18 @@ class GeminiTextService:
             )
 
         genai.configure(api_key=self.api_key)
+
+    @classmethod
+    def get_instance(cls) -> "GeminiTextService":
+        """Return a singleton instance."""
+        if cls._instance is None:
+            cls._instance = cls()
+        return cls._instance
+
+    @lru_cache(maxsize=4)
+    def _get_model(self, model_name: str):
+        """Cache GenerativeModel instances by model name (max 4)."""
+        return genai.GenerativeModel(model_name=model_name)
 
     def generate(
         self,
@@ -52,10 +78,8 @@ class GeminiTextService:
             The generated text string.
         """
         mdl = model or self.model_name
-        gen_model = genai.GenerativeModel(model_name=mdl)
+        gen_model = self._get_model(mdl)
 
-        # Build contents: system instruction + user prompt
-        contents = [prompt]
         generation_config = genai.types.GenerationConfig(
             max_output_tokens=2048,
             temperature=0.2,
@@ -64,35 +88,23 @@ class GeminiTextService:
 
         try:
             if system:
-                # Use chat session with system instruction
                 chat = gen_model.start_chat()
-                if system:
-                    # Prepend system instruction as a user message with context
-                    # because Gemini API doesn't have native 'system' role.
-                    # We instruct the model in the first turn.
-                    response = chat.send_message(
-                        f"{system}\n\n{prompt}",
-                        generation_config=generation_config,
-                    )
-                else:
-                    response = chat.send_message(
-                        prompt,
-                        generation_config=generation_config,
-                    )
+                response = chat.send_message(
+                    f"{system}\n\n{prompt}",
+                    generation_config=generation_config,
+                )
             else:
                 response = gen_model.generate_content(
-                    contents,
+                    [prompt],
                     generation_config=generation_config,
                 )
 
             # Extract text safely
             if not response.candidates:
                 return ""
-
             candidate = response.candidates[0]
             if not candidate.content or not candidate.content.parts:
                 return ""
-
             return "".join(part.text for part in candidate.content.parts if hasattr(part, "text"))
 
         except Exception as e:

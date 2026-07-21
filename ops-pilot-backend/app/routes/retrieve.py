@@ -13,6 +13,24 @@ from app.services.gemini_embeddings_service import GeminiEmbeddingsService
 
 router = APIRouter()
 
+# Singleton instances
+_faiss_store: FaissVectorStoreService | None = None
+_gemini_embed: GeminiEmbeddingsService | None = None
+
+
+def _get_faiss_store() -> FaissVectorStoreService:
+    global _faiss_store
+    if _faiss_store is None:
+        _faiss_store = FaissVectorStoreService(base_dir=settings.VECTORSTORE_BASE_DIR)
+    return _faiss_store
+
+
+def _get_gemini_embed() -> GeminiEmbeddingsService:
+    global _gemini_embed
+    if _gemini_embed is None:
+        _gemini_embed = GeminiEmbeddingsService.get_instance()
+    return _gemini_embed
+
 
 class RetrieveRequest(BaseModel):
     query: str = Field(..., description="User question to retrieve relevant chunks for")
@@ -54,10 +72,10 @@ def retrieve(req: RetrieveRequest) -> RetrieveResponse:
         raise HTTPException(status_code=400, detail="query must be a non-empty string")
 
     try:
-        gemini = GeminiEmbeddingsService(api_key=settings.GEMINI_API_KEY)
+        gemini = _get_gemini_embed()
         emb = gemini.embed_texts(texts=[req.query], model=req.model).vectors[0]
 
-        faiss_store = FaissVectorStoreService(base_dir=settings.VECTORSTORE_BASE_DIR)
+        faiss_store = _get_faiss_store()
         hits = faiss_store.search(
             index_name=req.index_name,
             query_embedding=emb,
@@ -90,4 +108,3 @@ def retrieve(req: RetrieveRequest) -> RetrieveResponse:
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to retrieve chunks: {e}")
-

@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import threading
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -37,21 +40,44 @@ def get_vectorstore_paths(*, base_dir: str, index_name: str) -> VectorStorePaths
 
 
 class FaissVectorStoreService:
-    """Minimal FAISS persistence layer.
+    """Minimal FAISS persistence layer with in-memory index caching.
 
     - Uses IndexFlatL2 for simplicity/determinism.
     - Stores metadata JSON keyed by vector position.
+    - FAISS indexes are cached in memory and invalidated on writes.
 
     Note: IndexFlatL2 doesn't require training.
     """
 
+    _instances: dict[str, "FaissVectorStoreService"] = {}
+    _instances_lock = threading.Lock()
+
+    def __new__(cls, *, base_dir: str) -> "FaissVectorStoreService":
+        """Return a singleton per base_dir to share the index cache."""
+        with cls._instances_lock:
+            if base_dir not in cls._instances:
+                instance = super().__new__(cls)
+                instance._initialized = False
+                cls._instances[base_dir] = instance
+            return cls._instances[base_dir]
+
     def __init__(self, *, base_dir: str) -> None:
+        if getattr(self, "_initialized", False):
+            return
+        self._initialized = True
+
         self.base_dir = base_dir
 
         # Lazy import so startup doesn't fail if faiss isn't installed.
         import faiss  # type: ignore
-
         self.faiss = faiss
+
+        # Thread-safety for cache access
+        self._cache_lock = threading.RLock()
+
+        # In-memory cache: {index_name: (mtime, faiss_index)}
+        # mtime is the file modification time at which this index was loaded.
+        self._index_cache: dict[str, tuple[float, Any]] = {}
 
     def _load_meta(self, meta_file: Path) -> list[dict[str, Any]]:
         if not meta_file.exists():
@@ -61,6 +87,30 @@ class FaissVectorStoreService:
     def _save_meta(self, meta_file: Path, meta: list[dict[str, Any]]) -> None:
         meta_file.parent.mkdir(parents=True, exist_ok=True)
         meta_file.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def _get_cached_index(self, index_file: Path) -> Any:
+        """Return a cached FAISS index if file hasn't changed, else load from disk."""
+        with self._cache_lock:
+            index_name = index_file.parent.name
+            current_mtime = index_file.stat().st_mtime if index_file.exists() else 0
+
+            cached = self._index_cache.get(index_name)
+            if cached is not None and cached[0] == current_mtime:
+                return cached[1]
+
+            # Load from disk
+            if not index_file.exists():
+                self._index_cache.pop(index_name, None)
+                return None
+
+            index = self.faiss.read_index(str(index_file))
+            self._index_cache[index_name] = (current_mtime, index)
+            return index
+
+    def _invalidate_cache(self, index_name: str) -> None:
+        """Remove the cached index after a write operation."""
+        with self._cache_lock:
+            self._index_cache.pop(index_name, None)
 
     def upsert(
         self,
@@ -86,7 +136,9 @@ class FaissVectorStoreService:
 
         index = None
         if paths.index_file.exists():
-            index = self.faiss.read_index(str(paths.index_file))
+            index = self._get_cached_index(paths.index_file)
+            if index is None:
+                index = self.faiss.read_index(str(paths.index_file))
 
             # Basic dimension check.
             if index.d != dim:
@@ -113,6 +165,9 @@ class FaissVectorStoreService:
         self.faiss.write_index(index, str(paths.index_file))
         self._save_meta(paths.meta_file, existing_meta)
 
+        # Invalidate cache so next read picks up the new file
+        self._invalidate_cache(index_name)
+
         return len(metadatas)
 
     def search(
@@ -124,11 +179,7 @@ class FaissVectorStoreService:
     ) -> list[dict[str, Any]]:
         """Search the persisted FAISS index and return top-k hits.
 
-        Returns a list of dicts that include:
-          - _vector_pos
-          - distance (FAISS L2 distance)
-          - similarity_score (higher is better; computed outside by caller if desired)
-          - any metadata fields stored in index_meta.json at that vector position
+        Uses an in-memory cache to avoid re-reading the index file on every call.
         """
         if top_k <= 0:
             return []
@@ -148,7 +199,10 @@ class FaissVectorStoreService:
         if q.ndim != 2 or q.shape[0] != 1:
             raise ValueError("query_embedding must be a single vector")
 
-        index = self.faiss.read_index(str(paths.index_file))
+        index = self._get_cached_index(paths.index_file)
+        if index is None:
+            return []
+
         if index.d != q.shape[1]:
             raise RuntimeError(
                 f"Query embedding dimension mismatch: index.d={index.d}, query.d={q.shape[1]}"
@@ -212,7 +266,6 @@ class FaissVectorStoreService:
             return 0
 
         # Rebuild FAISS index from kept vectors
-        # We need to re-embed the text of kept entries
         kept_texts = [md.get("text", "") for md in kept_meta if md.get("text", "").strip()]
 
         if not kept_texts:
@@ -221,18 +274,17 @@ class FaissVectorStoreService:
                 paths.index_file.unlink()
             if paths.meta_file.exists():
                 paths.meta_file.unlink()
+            self._invalidate_cache(index_name)
             return deleted_count
 
         # Get embeddings for kept texts using the same method
-        # We import here to avoid circular imports
         from app.services.sentence_transformer_embeddings_service import GeminiEmbeddingsService
         from app.config.settings import settings
 
-        embed_service = GeminiEmbeddingsService(api_key=settings.GEMINI_API_KEY)
+        embed_service = GeminiEmbeddingsService.get_instance()
         result = embed_service.embed_texts(texts=kept_texts, model=settings.GEMINI_EMBEDDING_MODEL)
 
         # Rebuild index from scratch
-        import numpy as np
         x = np.asarray(result.vectors, dtype=np.float32)
         dim = x.shape[1]
         index = self.faiss.IndexFlatL2(dim)
@@ -249,6 +301,7 @@ class FaissVectorStoreService:
         self.faiss.write_index(index, str(paths.index_file))
         self._save_meta(paths.meta_file, clean_meta)
 
+        # Invalidate cache
+        self._invalidate_cache(index_name)
+
         return deleted_count
-
-

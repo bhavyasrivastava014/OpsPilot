@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any, List, Literal, Optional
+from typing import Any, List
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
@@ -11,6 +11,24 @@ from app.services.faiss_vector_store_service import FaissVectorStoreService
 from app.services.gemini_embeddings_service import GeminiEmbeddingsService
 
 router = APIRouter()
+
+# Singleton instances
+_faiss_store: FaissVectorStoreService | None = None
+_gemini_embed: GeminiEmbeddingsService | None = None
+
+
+def _get_faiss_store() -> FaissVectorStoreService:
+    global _faiss_store
+    if _faiss_store is None:
+        _faiss_store = FaissVectorStoreService(base_dir=settings.VECTORSTORE_BASE_DIR)
+    return _faiss_store
+
+
+def _get_gemini_embed() -> GeminiEmbeddingsService:
+    global _gemini_embed
+    if _gemini_embed is None:
+        _gemini_embed = GeminiEmbeddingsService.get_instance()
+    return _gemini_embed
 
 
 class ChunkModel(BaseModel):
@@ -85,21 +103,19 @@ def embed_documents(req: EmbedRequest) -> EmbedResponse:
         )
 
     try:
-        gemini = GeminiEmbeddingsService(api_key=settings.GEMINI_API_KEY)
+        gemini = _get_gemini_embed()
         vectors_result = gemini.embed_texts(texts=flat_texts, model=req.model)
 
         if len(vectors_result.vectors) != len(flat_metadatas):
             raise RuntimeError("Embedding generation returned unexpected number of vectors")
 
-        faiss_store = FaissVectorStoreService(base_dir=settings.VECTORSTORE_BASE_DIR)
-        added_count = faiss_store.upsert(
+        faiss_store = _get_faiss_store()
+        faiss_store.upsert(
             index_name=req.index_name,
             embeddings=vectors_result.vectors,
             metadatas=flat_metadatas,
         )
 
-        # Keep response consistent: chunks_added is already per-doc.
-        # added_count can be used for debugging if needed.
         return EmbedResponse(
             ok=True,
             indexed=per_doc_indexed,
@@ -110,4 +126,3 @@ def embed_documents(req: EmbedRequest) -> EmbedResponse:
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to embed/index documents: {e}")
-

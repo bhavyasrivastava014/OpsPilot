@@ -22,6 +22,31 @@ FALLBACK_ANSWER = "I couldn't find that information in the uploaded documents."
 
 memory_service = ConversationMemoryService(max_turns=settings.CHAT_MEMORY_MAX_TURNS)
 
+# Singleton service instances
+_faiss_store: FaissVectorStoreService | None = None
+_gemini_embed: GeminiEmbeddingsService | None = None
+_gemini_text: GeminiTextService | None = None
+
+
+def _get_faiss_store() -> FaissVectorStoreService:
+    global _faiss_store
+    if _faiss_store is None:
+        _faiss_store = FaissVectorStoreService(base_dir=settings.VECTORSTORE_BASE_DIR)
+    return _faiss_store
+
+
+def _get_gemini_embed() -> GeminiEmbeddingsService:
+    global _gemini_embed
+    if _gemini_embed is None:
+        _gemini_embed = GeminiEmbeddingsService.get_instance()
+    return _gemini_embed
+
+
+def _get_gemini_text() -> GeminiTextService:
+    global _gemini_text
+    if _gemini_text is None:
+        _gemini_text = GeminiTextService.get_instance()
+    return _gemini_text
 
 
 class ChatRequest(BaseModel):
@@ -74,34 +99,29 @@ class ChatResponse(BaseModel):
 
 
 def _to_context(chunks: List[RetrievedChunk]) -> str:
-    # Keep formatting stable so Gemini can reason over the supplied text.
-    # Add boundaries + metadata.
-    parts: list[str] = []
-    for i, ch in enumerate(chunks, start=1):
-        meta_bits = []
-        if ch.filename:
-            meta_bits.append(f"filename={ch.filename}")
-        if ch.page is not None:
-            meta_bits.append(f"page={ch.page}")
-        if ch.chunk_id:
-            meta_bits.append(f"chunk_id={ch.chunk_id}")
-        if ch.chunk_index is not None:
-            meta_bits.append(f"chunk_index={ch.chunk_index}")
+    if not chunks:
+        return ""
 
-        meta = ", ".join(meta_bits)
-        boundary = f"[SOURCE {i}] {meta}".strip()
-        parts.append(boundary)
-        parts.append(ch.text)
-    return "\n\n".join(parts).strip()
+    parts: list[str] = []
+    for index, chunk in enumerate(chunks, start=1):
+        source_parts: list[str] = [f"[{index}]"]
+        if chunk.filename:
+            source_parts.append(chunk.filename)
+        if chunk.page is not None:
+            source_parts.append(f"page {chunk.page}")
+        if chunk.chunk_index is not None:
+            source_parts.append(f"chunk {chunk.chunk_index}")
+
+        header = " | ".join(source_parts)
+        parts.append(f"{header}\n{chunk.text}")
+
+    return "\n\n".join(parts)
 
 
 def _build_system_prompt() -> str:
     return (
-        "You are a document question answering assistant. "
-        "Answer ONLY from the supplied context excerpts. "
-        "Do not use outside knowledge. "
-        "If the answer is not contained in the context, respond exactly with: "
-        f"{FALLBACK_ANSWER}"
+        "You are a helpful assistant. Use only the provided context excerpts to answer the user's question. "
+        "If the context does not contain enough information, say that you could not find the information."
     )
 
 
@@ -148,11 +168,11 @@ def chat(req: ChatRequest) -> ChatResponse:
     # Use Gemini API for generation
     try:
         # Retriever: embed question -> FAISS search
-        gemini_embed = GeminiEmbeddingsService(api_key=settings.GEMINI_API_KEY)
+        gemini_embed = _get_gemini_embed()
         retrieval_query = _build_retrieval_query(req.question, history)
         q_emb = gemini_embed.embed_texts(texts=[retrieval_query], model=req.embed_model).vectors[0]
 
-        faiss_store = FaissVectorStoreService(base_dir=settings.VECTORSTORE_BASE_DIR)
+        faiss_store = _get_faiss_store()
         hits = faiss_store.search(index_name=req.index_name, query_embedding=q_emb, top_k=req.top_k)
 
         # Convert to RetrievedChunk-like objects (reuse schema)
@@ -189,7 +209,7 @@ def chat(req: ChatRequest) -> ChatResponse:
             )
 
             # Use Gemini API for answer generation
-            gemini_text = GeminiTextService(api_key=settings.GEMINI_API_KEY)
+            gemini_text = _get_gemini_text()
             requested_model = req.gen_model or settings.GEMINI_GEN_MODEL
             try:
                 text = gemini_text.generate(prompt=prompt, system=system_prompt, model=requested_model)

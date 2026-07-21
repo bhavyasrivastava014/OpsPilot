@@ -23,6 +23,24 @@ TMP_UPLOAD_DIR = Path(__file__).resolve().parents[1] / "uploads" / "tmp"
 PDF_MAGIC_HEADER = b"%PDF-"
 EMBEDDING_BATCH_SIZE = 100
 
+# Singleton instances
+_faiss_store: FaissVectorStoreService | None = None
+_gemini_embed: GeminiEmbeddingsService | None = None
+
+
+def _get_faiss_store() -> FaissVectorStoreService:
+    global _faiss_store
+    if _faiss_store is None:
+        _faiss_store = FaissVectorStoreService(base_dir=settings.VECTORSTORE_BASE_DIR)
+    return _faiss_store
+
+
+def _get_gemini_embed() -> GeminiEmbeddingsService:
+    global _gemini_embed
+    if _gemini_embed is None:
+        _gemini_embed = GeminiEmbeddingsService.get_instance()
+    return _gemini_embed
+
 
 class IngestedDocument(BaseModel):
     document_id: str
@@ -112,7 +130,7 @@ async def ingest_documents(
             temp_path.unlink(missing_ok=True)
 
     try:
-        embeddings_service = GeminiEmbeddingsService(api_key=settings.GEMINI_API_KEY)
+        embeddings_service = _get_gemini_embed()
         vectors: list[list[float]] = []
         for start in range(0, len(all_texts), EMBEDDING_BATCH_SIZE):
             batch = all_texts[start : start + EMBEDDING_BATCH_SIZE]
@@ -121,7 +139,7 @@ async def ingest_documents(
                     texts=batch, model=settings.GEMINI_EMBEDDING_MODEL
                 ).vectors
             )
-        FaissVectorStoreService(base_dir=settings.VECTORSTORE_BASE_DIR).upsert(
+        _get_faiss_store().upsert(
             index_name=index_name, embeddings=vectors, metadatas=all_metadata
         )
     except Exception as exc:

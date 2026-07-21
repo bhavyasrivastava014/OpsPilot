@@ -28,6 +28,24 @@ TMP_UPLOAD_DIR = BASE_DIR / "uploads" / "tmp"
 
 PDF_MAGIC_HEADER = b"%PDF-"
 
+# Singleton instances
+_faiss_store: FaissVectorStoreService | None = None
+_gemini_embed: GeminiEmbeddingsService | None = None
+
+
+def _get_faiss_store() -> FaissVectorStoreService:
+    global _faiss_store
+    if _faiss_store is None:
+        _faiss_store = FaissVectorStoreService(base_dir=settings.VECTORSTORE_BASE_DIR)
+    return _faiss_store
+
+
+def _get_gemini_embed() -> GeminiEmbeddingsService:
+    global _gemini_embed
+    if _gemini_embed is None:
+        _gemini_embed = GeminiEmbeddingsService.get_instance()
+    return _gemini_embed
+
 
 def _sanitize_filename(filename: str) -> str:
     # Keep basename only; strip path components.
@@ -76,14 +94,9 @@ async def upload_pdfs(files: List[UploadFile] = File(...)):
     results: list[dict] = []
     errors: list[dict] = []
 
-    # Create embedding service and FAISS store once (if available)
-    try:
-        gemini = GeminiEmbeddingsService()
-        faiss_store = FaissVectorStoreService(base_dir=settings.VECTORSTORE_BASE_DIR)
-    except Exception:
-        # We'll create them later once we successfully validate at least one PDF.
-        gemini = None
-        faiss_store = None
+    # Use singleton services
+    gemini = _get_gemini_embed()
+    faiss_store = _get_faiss_store()
 
     for upload in files:
         original_filename = upload.filename or ""
@@ -121,12 +134,6 @@ async def upload_pdfs(files: List[UploadFile] = File(...)):
             pages = _extract_pdf_pages_with_error_handling(temp_path)
 
             # --- Full pipeline (extract -> chunk -> embed -> store) ---
-            # Ensure Gemini + FAISS are ready only when needed.
-            if gemini is None:
-                gemini = GeminiEmbeddingsService()
-            if faiss_store is None:
-                faiss_store = FaissVectorStoreService(base_dir=settings.VECTORSTORE_BASE_DIR)
-
             extracted_pages = extract_pdf_pages_text(temp_path, filename=original_filename)
             chunk_dicts = build_chunks_with_metadata(
                 pages=extracted_pages,
@@ -153,7 +160,6 @@ async def upload_pdfs(files: List[UploadFile] = File(...)):
                 vectors_result = gemini.embed_texts(texts=texts, model=settings.GEMINI_EMBEDDING_MODEL)
 
                 metadatas: list[dict] = []
-                i = 0
                 for c in chunks:
                     if not (c.text or "").strip():
                         continue
@@ -167,7 +173,6 @@ async def upload_pdfs(files: List[UploadFile] = File(...)):
                             "text": c.text,
                         }
                     )
-                    i += 1
 
                 faiss_store.upsert(
                     index_name="default",
@@ -189,18 +194,16 @@ async def upload_pdfs(files: List[UploadFile] = File(...)):
             )
 
         except HTTPException as he:
-            if temp_path.exists():
-                temp_path.unlink(missing_ok=True)
             errors.append({"filename": original_filename, "error": he.detail})
         except Exception as e:
-            if temp_path.exists():
-                temp_path.unlink(missing_ok=True)
             errors.append({"filename": original_filename, "error": str(e)})
         finally:
+            # Clean up temp file regardless of success/failure
+            if temp_path.exists():
+                temp_path.unlink(missing_ok=True)
             await upload.close()
 
     if errors:
         return JSONResponse(status_code=400, content={"ok": False, "errors": errors})
 
     return {"ok": True, "files": results}
-

@@ -33,16 +33,11 @@ class Settings(BaseSettings):
         description="Sentence-transformers embedding model name",
     )
 
-    # Ollama (local model server)
-    OLLAMA_URL: str | None = Field(default="http://localhost:11434", description="Base URL for local Ollama server")
-    OLLAMA_MODEL: str = Field(default="mistral-7b-instruct", description="Default Ollama model name to use for generation")
-
     # Vector store persistence
     VECTORSTORE_BASE_DIR: str = Field(default="app/vectorstores")
 
     # Conversation memory (in-memory per backend process)
     CHAT_MEMORY_MAX_TURNS: int = Field(default=12, description="Max stored chat turns per session (user+assistant entries)")
-
 
     # CORS
 
@@ -64,4 +59,3 @@ def get_settings() -> Settings:
 
 
 settings = get_settings()
-
